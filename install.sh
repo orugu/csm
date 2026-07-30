@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.4 (2026-07-30)
+# version 1.5 (2026-07-30)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -25,6 +25,7 @@
 #   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
 #   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
 #   csm --logs      여러 호스트 로그를 동시에 tail(tmux 분할창/접두어 방식)
+#   csm --graph     ProxyJump 체인을 트리로 시각화
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -74,6 +75,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
 # csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
 # csm --logs  : 여러 호스트를 멀티선택해서 로그를 동시에 tail(tmux 있으면 분할창, 없으면 접두어 방식)
+# csm --graph : Host의 ProxyJump 관계를 그룹별 트리로 시각화
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -107,6 +109,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
   csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
   csm --logs       여러 호스트를 멀티선택해서 로그를 동시에 tail
+  csm --graph      ProxyJump 체인을 그룹별 트리로 시각화
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -535,6 +538,113 @@ EOF
   fi
 }
 
+_csm_graph() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --graph
+
+~/.ssh/config의 각 Host에 걸린 ProxyJump 관계를 그룹별 트리로 보여준다.
+예: main -> parking -> HC1 처럼 여러 단계를 거쳐 접속하는 호스트 구조를 한눈에 파악.
+ProxyJump가 없는 호스트는 트리의 뿌리(직접 접속)로 표시된다.
+EOF
+      return
+      ;;
+  esac
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  python3 <<'PYEOF'
+import os
+import re
+
+path = os.path.expanduser("~/.ssh/config")
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+
+group = "기타"
+group_order = []
+# host -> {"group": ..., "proxyjump": ... or None}
+hosts = {}
+
+current_aliases = []
+
+
+def flush(proxyjump):
+    for a in current_aliases:
+        hosts[a] = {"group": group, "proxyjump": proxyjump}
+
+
+for line in lines:
+    s = line.strip()
+    m = re.match(r"#\s*csm-group:\s*(.+)$", s)
+    if m:
+        # 그룹을 바꾸기 전에 직전 Host 블록부터 확정해야 한다 — 안 그러면 ProxyJump 없는
+        # 호스트(예: main)가 자기 그룹이 아니라 다음에 나오는 새 그룹으로 잘못 귀속된다
+        # (실제로 이 파일 작성 중 논리를 추적하다 발견한 버그, 실행 전에 미리 수정함).
+        flush(None)
+        current_aliases = []
+        group = m.group(1).strip()
+        if group not in group_order:
+            group_order.append(group)
+        continue
+    m = re.match(r"Host\s+(.+)$", s, re.IGNORECASE)
+    if m:
+        flush(None)  # 이전 Host 블록에 ProxyJump가 없었으면 확정
+        aliases = [a for a in m.group(1).split() if "*" not in a]
+        current_aliases = aliases
+        continue
+    m = re.match(r"ProxyJump\s+(.+)$", s, re.IGNORECASE)
+    if m and current_aliases:
+        flush(m.group(1).strip())
+        current_aliases = []  # 이 블록은 이미 확정했으니 다음 Host 전까지 재확정 방지
+flush(None)  # 마지막 블록 처리
+
+for h in hosts.values():
+    if h["group"] not in group_order:
+        group_order.append(h["group"])
+
+if not hosts:
+    print("등록된 호스트가 없습니다.")
+    raise SystemExit
+
+children = {}
+roots = []
+for alias, info in hosts.items():
+    jump = info["proxyjump"]
+    if jump and jump in hosts:
+        children.setdefault(jump, []).append(alias)
+    else:
+        roots.append((alias, jump))  # jump가 있는데 hosts에 없으면 외부 경유지로 표시
+
+
+def print_tree(alias, prefix="", is_last=True, external_jump=None):
+    connector = "└── " if is_last else "├── "
+    label = alias
+    if external_jump:
+        label += f"  (경유: {external_jump}, csm 목록 밖 호스트)"
+    print(prefix + connector + label)
+    child_prefix = prefix + ("    " if is_last else "│   ")
+    kids = sorted(children.get(alias, []))
+    for i, kid in enumerate(kids):
+        print_tree(kid, child_prefix, i == len(kids) - 1)
+
+
+for g in group_order:
+    group_roots = sorted([a for a, j in roots if hosts[a]["group"] == g])
+    if not group_roots:
+        continue
+    print(f"[{g}]")
+    for i, alias in enumerate(group_roots):
+        ext = next((j for a, j in roots if a == alias), None)
+        print_tree(alias, "", i == len(group_roots) - 1, external_jump=ext)
+    print()
+PYEOF
+}
+
 csm() {
   case "$1" in
     --help|-h|-\?)
@@ -562,6 +672,11 @@ csm() {
     --status)
       shift
       _csm_status "$@"
+      return
+      ;;
+    --graph)
+      shift
+      _csm_graph "$@"
       return
       ;;
     -*)
