@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.2 (2026-07-30)
+# version 1.3 (2026-07-30)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -23,6 +23,7 @@
 #   csm --mkdir     새 Host 항목을 대화형으로 추가 (그룹 지정/새 그룹 생성 가능)
 #   csm --move      기존 호스트를 다른 그룹으로 이동
 #   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
+#   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -70,6 +71,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --mkdir: 새 Host 항목을 대화형으로 추가(그룹 선택/새 그룹 생성 가능)
 # csm --move : 기존 호스트를 다른 그룹으로 이동
 # csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
+# csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -101,6 +103,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --mkdir      새 Host 항목을 대화형으로 추가
   csm --move       기존 호스트를 다른 그룹으로 이동
   csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
+  csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -383,6 +386,83 @@ EOF
   fi
 }
 
+_csm_status() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --status
+
+~/.ssh/config에 등록된 모든 호스트에 병렬로 SSH 접속해서
+살아있는지 / 응답시간 / uptime / 디스크(/) 사용량을 표로 보여준다.
+
+접속 실패한 호스트도 DOWN으로 같이 표시된다(오프라인, 방화벽, SSH 키 미등록 등).
+SSH 키가 known_hosts에 없는 호스트는 비대화형(BatchMode)이라 자동으로 실패 처리된다
+(중간자 공격 방지를 위해 자동으로 새 키를 신뢰하지 않음 — 처음 보는 호스트는
+`ssh <host>`로 한 번 직접 접속해서 키를 등록해줘야 --status에서도 UP으로 잡힌다).
+EOF
+      return
+      ;;
+  esac
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  local hosts
+  hosts=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{for(i=2;i<=NF;i++) print $i}')
+  if [ -z "$hosts" ]; then
+    echo "등록된 호스트가 없습니다."
+    return 1
+  fi
+
+  python3 - "$hosts" <<'PYEOF'
+import sys
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+hosts = [h.strip() for h in sys.argv[1].splitlines() if h.strip()]
+
+
+def check(host):
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host,
+             "uptime; df -h / 2>/dev/null | tail -1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        elapsed = time.time() - start
+        if proc.returncode != 0:
+            err = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "접속 실패"
+            return host, False, elapsed, err, ""
+        lines = proc.stdout.strip().splitlines()
+        uptime_line = lines[0] if lines else ""
+        disk_line = lines[1] if len(lines) > 1 else ""
+        return host, True, elapsed, uptime_line, disk_line
+    except subprocess.TimeoutExpired:
+        return host, False, time.time() - start, "타임아웃", ""
+    except Exception as e:
+        return host, False, time.time() - start, str(e), ""
+
+
+results = []
+with ThreadPoolExecutor(max_workers=20) as ex:
+    for r in ex.map(check, hosts):
+        results.append(r)
+
+print(f"{'Host':<24} {'상태':<6} {'응답시간':<10} Uptime / Disk")
+print("-" * 100)
+for host, ok, elapsed, info, disk in results:
+    status = "UP" if ok else "DOWN"
+    t = f"{elapsed:.2f}s"
+    print(f"{host:<24} {status:<6} {t:<10} {info}")
+    if ok and disk:
+        print(f"{'':<24} {'':<6} {'':<10} {disk}")
+PYEOF
+}
+
 csm() {
   case "$1" in
     --help|-h|-\?)
@@ -400,6 +480,11 @@ csm() {
     --tunnel)
       shift
       _csm_tunnel "$@"
+      return
+      ;;
+    --status)
+      shift
+      _csm_status "$@"
       return
       ;;
     -*)
