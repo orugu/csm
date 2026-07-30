@@ -52,6 +52,12 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
   수정한다 — SSH 설정 파일이라 실수하면 접속 자체가 막히는 파일이므로, 이 로직을
   건드릴 땐 반드시 **원본 파일이 아니라 임시 복사본**으로 먼저 검증할 것
   (`cp ~/.ssh/config /tmp/test_config` 해서 그걸로 실험).
+- **`csm --logs`의 tmux 경로는 이 저장소를 만든 원본 머신에 tmux 자체가 안 깔려있어서
+  실측 검증을 못 했다.** tmux 없을 때의 대체 경로(각 줄 앞에 `[호스트명]` 접두어 붙여서
+  합치는 방식)는 실제 호스트 3개로 동시 접속해서 정상 동작 확인했지만, `tmux new-session`/
+  `split-window`/`select-layout tiled`/`attach` 시퀀스는 표준 tmux CLI 문법대로 작성만
+  하고 실제 tmux 환경에서 돌려보지는 않았다. tmux가 있는 환경에서 처음 쓸 때는 이 경로가
+  기대대로 동작하는지 확인부터 할 것.
 
 ## 알려진 제한 (일부러 안 고친 것, 버그 아님)
 

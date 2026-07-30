@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.3 (2026-07-30)
+# version 1.4 (2026-07-30)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -24,6 +24,7 @@
 #   csm --move      기존 호스트를 다른 그룹으로 이동
 #   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
 #   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
+#   csm --logs      여러 호스트 로그를 동시에 tail(tmux 분할창/접두어 방식)
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -72,6 +73,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --move : 기존 호스트를 다른 그룹으로 이동
 # csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
 # csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
+# csm --logs  : 여러 호스트를 멀티선택해서 로그를 동시에 tail(tmux 있으면 분할창, 없으면 접두어 방식)
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -104,6 +106,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --move       기존 호스트를 다른 그룹으로 이동
   csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
   csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
+  csm --logs       여러 호스트를 멀티선택해서 로그를 동시에 tail
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -463,6 +466,75 @@ for host, ok, elapsed, info, disk in results:
 PYEOF
 }
 
+_csm_logs() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --logs
+
+fzf로 여러 호스트를 멀티선택(Tab으로 선택/해제, Enter로 확정)한 뒤, 각 호스트에서
+돌릴 명령(예: "tail -f /var/log/syslog", "journalctl -f")을 입력하면 동시에 실행해서
+로그를 한 화면에서 본다.
+
+  - tmux가 있으면: 창을 호스트 수만큼 분할해서 각 창에 붙는다.
+  - tmux가 없으면: 각 줄 앞에 [호스트명] 접두어를 붙여서 한 터미널에 섞어 보여준다
+    (구분은 덜 되지만 tmux 설치 없이도 동작).
+
+Ctrl+C로 전체 종료(tmux 쓰는 경우 tmux 세션 자체를 종료: prefix + &, 또는 세션 밖에서
+`tmux kill-session -t <세션이름>`).
+EOF
+      return
+      ;;
+  esac
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  local hosts_selected
+  hosts_selected=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
+    fzf --multi --height 60% --reverse --prompt="로그 볼 호스트(Tab으로 여러개, Enter로 확정) > " \
+        --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
+  if [ -z "$hosts_selected" ]; then
+    echo "선택 안 함"
+    return
+  fi
+
+  printf "각 호스트에서 실행할 명령 (예: tail -f /var/log/syslog, journalctl -f): "
+  local cmd
+  read -r cmd
+  if [ -z "$cmd" ]; then
+    echo "명령을 입력해야 합니다. 취소됨"
+    return 1
+  fi
+
+  local -a hosts_arr
+  hosts_arr=("${(@f)hosts_selected}")
+
+  if command -v tmux >/dev/null 2>&1; then
+    local session="csm-logs-$$"
+    tmux new-session -d -s "$session" -n logs "ssh ${hosts_arr[1]} '$cmd'; echo; echo '[$hosts_arr[1] 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
+    local i
+    for (( i = 2; i <= ${#hosts_arr[@]}; i++ )); do
+      tmux split-window -t "$session" \
+        "ssh ${hosts_arr[i]} '$cmd'; echo; echo '[${hosts_arr[i]} 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
+      tmux select-layout -t "$session" tiled > /dev/null
+    done
+    tmux attach -t "$session"
+  else
+    echo "tmux가 없어서 [호스트명] 접두어로 합쳐서 보여줍니다 (Ctrl+C로 전체 종료)."
+    local -a pids
+    local h
+    for h in "${hosts_arr[@]}"; do
+      ssh "$h" "$cmd" 2>&1 | sed "s/^/[$h] /" &
+      pids+=($!)
+    done
+    trap "kill ${pids[@]} 2>/dev/null" INT
+    wait
+  fi
+}
+
 csm() {
   case "$1" in
     --help|-h|-\?)
@@ -480,6 +552,11 @@ csm() {
     --tunnel)
       shift
       _csm_tunnel "$@"
+      return
+      ;;
+    --logs)
+      shift
+      _csm_logs "$@"
       return
       ;;
     --status)
