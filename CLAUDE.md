@@ -37,11 +37,17 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
   `# csm-group: 이름` 주석을 다는 방식"으로 마이그레이션했고, 15개 호스트 전부
   `ssh -G <host>`로 재검증해서 무손실 이전을 확인했다. 다른 머신에 새로 설치할 때는
   이 마이그레이션이 필요 없다 — 처음부터 `# csm-group:` 방식으로 시작하면 된다.
-- `csm --mkdir`/`csm --move`가 `~/.ssh/config`를 수정하는 로직은 파이썬(`python3 -`
-  heredoc)으로 짜여 있다. 로컬 테스트 중 실제로 잡은 버그: Host 블록 텍스트를
-  파이프(stdin)로 넘기려 했는데 파이썬 스크립트 자체도 heredoc으로 stdin을 쓰고 있어서
-  충돌했다(파이프가 무시됨) — 지금은 블록을 argv로 넘기도록 고쳐져 있다. 이 파일을
-  수정할 일이 있으면 같은 함정을 다시 만들지 않도록 주의.
+- **`python3 - <<'PYEOF' ... PYEOF`에 파이프로 데이터를 같이 넘기면 안 된다 — 두 번 실제로
+  잡은 버그다.** `python3 -`는 stdin에서 실행할 스크립트를 읽는데, `foo | python3 - <<'EOF'`
+  처럼 파이프와 heredoc을 동시에 fd0에 걸면 **파이프가 이긴다**(heredoc이 아니라!) — 즉
+  `python3 -`가 heredoc에 적어둔 파이썬 코드가 아니라 파이프로 들어온 데이터를 "실행할
+  스크립트"로 착각해서 읽어버린다. 실측(2026-07-30): `printf 'host1\n' | python3 - <<'EOF'
+  import sys; ... EOF` 를 돌리면 `NameError: name 'host1' is not defined`가 난다 —
+  heredoc의 파이썬 코드는 통째로 무시되고 파이프 데이터 "host1"이 코드로 해석된 것.
+  `--mkdir`(Host 블록 텍스트)과 `--status`(호스트 목록) 양쪽에서 실제로 이 버그를 만들고
+  고쳤다. **해결책은 항상 동일: 파이프 쓰지 말고 데이터를 `python3 - <스크립트경로없이
+  바로_인자로> <<'PYEOF'` 식으로 argv로 넘겨서 `sys.argv[N]`으로 읽을 것.** 이 파일을
+  다시 수정할 때 같은 함정을 세 번째로 만들지 않도록 주의.
 - `csm --mkdir`/`csm --move`는 항상 `~/.ssh/config.bak.<타임스탬프>`로 백업 후
   수정한다 — SSH 설정 파일이라 실수하면 접속 자체가 막히는 파일이므로, 이 로직을
   건드릴 땐 반드시 **원본 파일이 아니라 임시 복사본**으로 먼저 검증할 것
