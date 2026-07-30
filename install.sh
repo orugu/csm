@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.1 (2026-07-30)
+# version 1.2 (2026-07-30)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -22,6 +22,7 @@
 #   csm             그룹 -> 호스트 순으로 골라 접속
 #   csm --mkdir     새 Host 항목을 대화형으로 추가 (그룹 지정/새 그룹 생성 가능)
 #   csm --move      기존 호스트를 다른 그룹으로 이동
+#   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -68,6 +69,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 #              (csm-group 주석이 없거나 그룹이 1개뿐이면 sm과 동일하게 동작)
 # csm --mkdir: 새 Host 항목을 대화형으로 추가(그룹 선택/새 그룹 생성 가능)
 # csm --move : 기존 호스트를 다른 그룹으로 이동
+# csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -98,6 +100,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm              그룹 -> 호스트 순으로 골라서 접속
   csm --mkdir      새 Host 항목을 대화형으로 추가
   csm --move       기존 호스트를 다른 그룹으로 이동
+  csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -318,6 +321,68 @@ PYEOF
   fi
 }
 
+_csm_tunnel() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --tunnel
+
+호스트를 fzf로 고른 뒤 SSH 포트포워딩을 연다:
+  - 로컬 포워딩(-L): 내 로컬 포트 -> (고른 호스트 경유) -> 지정한 원격 호스트:포트
+  - SOCKS 동적 포워딩(-D): 내 로컬 포트를 SOCKS5 프록시로 사용 (브라우저 프록시 설정 등에 사용)
+
+포그라운드로 실행되며 Ctrl+C로 터널을 닫는다.
+EOF
+      return
+      ;;
+  esac
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  local host
+  host=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
+    fzf --height 40% --reverse --prompt="터널 열 호스트 > " \
+        --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
+  [ -z "$host" ] && return
+
+  local mode
+  mode=$(printf '로컬 포워딩 (-L)\nSOCKS 동적 포워딩 (-D)\n' | \
+    fzf --height 40% --reverse --prompt="포워딩 종류 > ")
+  [ -z "$mode" ] && return
+
+  if [[ "$mode" == SOCKS* ]]; then
+    printf "로컬 포트 (SOCKS 프록시로 쓸 포트): "
+    local local_port
+    read -r local_port
+    if [ -z "$local_port" ]; then
+      echo "포트를 입력해야 합니다. 취소됨"
+      return 1
+    fi
+    echo "SOCKS 프록시 여는 중: localhost:$local_port -> ($host 경유) (Ctrl+C로 종료)"
+    ssh -N -D "$local_port" "$host"
+  else
+    printf "로컬 포트: "
+    local local_port
+    read -r local_port
+    printf "원격 호스트 (엔터=localhost, $host 기준 상대적): "
+    local remote_host
+    read -r remote_host
+    remote_host="${remote_host:-localhost}"
+    printf "원격 포트: "
+    local remote_port
+    read -r remote_port
+    if [ -z "$local_port" ] || [ -z "$remote_port" ]; then
+      echo "로컬/원격 포트는 필수입니다. 취소됨"
+      return 1
+    fi
+    echo "터널 여는 중: localhost:$local_port -> ($host 경유) -> $remote_host:$remote_port (Ctrl+C로 종료)"
+    ssh -N -L "${local_port}:${remote_host}:${remote_port}" "$host"
+  fi
+}
+
 csm() {
   case "$1" in
     --help|-h|-\?)
@@ -330,6 +395,11 @@ csm() {
       ;;
     --move)
       _csm_move
+      return
+      ;;
+    --tunnel)
+      shift
+      _csm_tunnel "$@"
       return
       ;;
     -*)
