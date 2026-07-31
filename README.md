@@ -36,7 +36,7 @@ sudo를 걸거나 하지 않음) 계속 진행한다.
 | `csm --graph` | ProxyJump 체인을 그룹별 트리로 시각화 |
 | `csm --copy-id` | 호스트를 골라 `ssh-copy-id`로 공개키 등록 (다음부터 비밀번호 없이 접속) |
 | `csm --setting` | fzf UI로 설정 값 변경 (`--reset`으로 초기화) |
-| `csm --update` | GitHub에서 최신 버전으로 재설치 |
+| `csm --update` | GitHub에서 최신 버전으로 재설치 (원격이 실제로 더 높을 때만; `--force`로 강제 가능) |
 | `csm --help`, `-h` | 도움말 |
 
 ### 업데이트 알림

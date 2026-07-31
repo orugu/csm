@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.8 (2026-07-31)
+# version 1.9 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -96,7 +96,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # --mkdir/--move는 파일을 고치기 전에 항상 ~/.ssh/config.bak.<타임스탬프>로 백업을 남긴다.
 # 여러 별칭이 한 Host 줄에 같이 있는 경우(예: "Host a b c") --move는 그 줄 전체를 통째로 옮긴다.
 
-_CSM_VERSION="1.8"
+_CSM_VERSION="1.9"
 _CSM_REPO_SSH="git@github.com:orugu/csm.git"
 _CSM_UPDATE_CACHE="$HOME/.config/csm/update_cache"
 
@@ -146,6 +146,13 @@ _csm_refresh_update_cache_if_stale() {
   fi
 }
 
+# a가 b보다 (버전으로) 더 높으면 성공(0). "1.8" 같은 X.Y 형식 문자열을 받는다(v 접두어 없이).
+_csm_version_gt() {
+  local a="$1" b="$2"
+  [ "$a" = "$b" ] && return 1
+  [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]
+}
+
 # 새 버전이 있으면 성공(0), 없으면 실패(1) - 캐시가 오래됐으면 이 안에서 새로 확인한다.
 _csm_update_available() {
   _csm_refresh_update_cache_if_stale
@@ -153,8 +160,7 @@ _csm_update_available() {
   latest=$(_csm_cached_latest)
   [ -z "$latest" ] && return 1
   latest_num="${latest#v}"
-  [ "$latest_num" = "$_CSM_VERSION" ] && return 1
-  [ "$(printf '%s\n%s\n' "$_CSM_VERSION" "$latest_num" | sort -V | tail -1)" = "$latest_num" ]
+  _csm_version_gt "$latest_num" "$_CSM_VERSION"
 }
 
 # sm/csm 메인 화면 fzf에 넘길 --header/--bind 인자를 전역 배열 _CSM_UPD_ARGS에 채운다
@@ -178,25 +184,44 @@ _csm_update_fzf_args() {
 }
 
 _csm_update() {
+  local force=0
   case "$1" in
     --help|-h|-\?)
       cat <<'EOF'
-사용법: csm --update
+사용법: csm --update [--force]
 
 GitHub(orugu/csm)에서 최신 버전을 clone해서 install.sh를 다시 돌린다(재설치).
+현재 버전보다 원격이 실제로 더 높을 때만 진행한다 - 이미 최신이거나(개발 중 버전처럼)
+로컬이 더 앞서 있으면 그냥 알리고 끝낸다. 그래도 강제로 재설치하고 싶으면 --force.
+
 설치 후에는 새 터미널을 열거나 'source ~/.zshrc' 해야 새 버전 함수가 적용된다
 (현재 실행 중인 셸은 계속 옛날 버전의 함수를 갖고 있음 - 다른 CLI 업데이트와 동일).
 EOF
       return
       ;;
+    --force)
+      force=1
+      ;;
   esac
 
   echo "최신 버전 확인 중..."
-  local remote
+  local remote remote_num
   remote=$(_csm_remote_version)
   if [ -z "$remote" ]; then
     echo "GitHub에서 버전 정보를 가져오지 못했습니다(네트워크 또는 저장소 접근 권한 확인)."
     return 1
+  fi
+  remote_num="${remote#v}"
+
+  if [ "$force" -ne 1 ] && ! _csm_version_gt "$remote_num" "$_CSM_VERSION"; then
+    if [ "$remote_num" = "$_CSM_VERSION" ]; then
+      echo "이미 최신 버전입니다 ($_CSM_VERSION)."
+    else
+      echo "현재 버전($_CSM_VERSION)이 GitHub 최신 태그($remote)보다 같거나 앞서 있어서 아무것도 안 했습니다."
+      echo "그래도 재설치하려면: csm --update --force"
+    fi
+    _csm_write_update_cache "$remote"
+    return 0
   fi
 
   local tmpdir
@@ -348,7 +373,27 @@ EOF
     printf "%s 새 값 (엔터만 누르면 취소): " "$key"
     local newval
     read -r newval
-    [ -n "$newval" ] && _csm_set_setting "$key" "$newval"
+    [ -z "$newval" ] && continue
+
+    # 숫자여야 하는 설정에 이상한 값을 넣으면 나중에 csm --status 등에서 파이썬
+    # int() 변환이 그대로 터져서 크래시로 이어지던 버그가 있었다(실측 확인) - 저장 전에
+    # 먼저 걸러낸다.
+    case "$key" in
+      status_timeout|status_workers|update_check_interval_hours|mkdir_default_port)
+        if ! [[ "$newval" =~ ^[0-9]+$ ]] || [ "$newval" -le 0 ]; then
+          echo "숫자(1 이상의 정수)만 가능합니다: $newval (저장 안 함)"
+          continue
+        fi
+        ;;
+      fzf_height)
+        if ! [[ "$newval" =~ ^[0-9]+$ ]] || [ "$newval" -lt 1 ] || [ "$newval" -gt 100 ]; then
+          echo "1~100 사이 숫자만 가능합니다: $newval (저장 안 함)"
+          continue
+        fi
+        ;;
+    esac
+
+    _csm_set_setting "$key" "$newval"
   done
 }
 
@@ -851,6 +896,14 @@ EOF
     return 1
   fi
 
+  # tmux 경로는 명령 전체를 하나의 문자열로 만들어서 tmux에 넘기는데, 그 문자열 안에서
+  # $cmd를 그냥 작은따옴표로 감싸기만 하면(구버전 방식) $cmd 자체에 작은따옴표가 들어있을 때
+  # (예: grep 'ERROR' 같은 명령) 그 따옴표가 감싸는 따옴표를 조기 종료시켜서 ssh에 명령이
+  # 여러 조각으로 쪼개져 전달되는 버그가 있었다(실측 확인: sh -c로 재파싱해서 인자가
+  # 2개로 쪼개지는 것까지 확인). zsh 내장 `${(q)var}`(셸이 다시 파싱해도 원래 문자열
+  # 그대로 한 덩어리로 복원되는 자동 이스케이프)로 교체 - 수동 백슬래시 조합보다 훨씬 안전.
+  local cmd_q="${(q)cmd}"
+
   local -a hosts_arr
   hosts_arr=("${(@f)hosts_selected}")
 
@@ -869,11 +922,11 @@ EOF
 
   if [ "$use_tmux" -eq 1 ]; then
     local session="csm-logs-$$"
-    tmux new-session -d -s "$session" -n logs "ssh ${hosts_arr[1]} '$cmd'; echo; echo '[$hosts_arr[1] 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
+    tmux new-session -d -s "$session" -n logs "ssh ${hosts_arr[1]} $cmd_q; echo; echo '[${hosts_arr[1]} 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
     local i
     for (( i = 2; i <= ${#hosts_arr[@]}; i++ )); do
       tmux split-window -t "$session" \
-        "ssh ${hosts_arr[i]} '$cmd'; echo; echo '[${hosts_arr[i]} 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
+        "ssh ${hosts_arr[i]} $cmd_q; echo; echo '[${hosts_arr[i]} 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
       tmux select-layout -t "$session" tiled > /dev/null
     done
     tmux attach -t "$session"
@@ -973,7 +1026,23 @@ for alias, info in hosts.items():
         roots.append((alias, jump))  # jump가 있는데 hosts에 없으면 외부 경유지로 표시
 
 
-def print_tree(alias, prefix="", is_last=True, external_jump=None):
+visited = set()
+
+
+def print_tree(alias, prefix="", is_last=True, external_jump=None, _seen=None):
+    # ProxyJump가 순환(A->B->A)이면 트리를 아무리 타고 내려가도 루트로 안 이어져서
+    # 원래는 그 호스트들이 --graph 출력에서 통째로 조용히 사라지는 버그였다(실측 확인:
+    # 2개짜리 순환을 만들어보니 두 호스트 다 roots에도 안 잡히고 출력 자체에서 빠짐).
+    # 여기 _seen은 혹시 나중에 코드가 바뀌어서 사이클이 루트에서 도달 가능해지는
+    # 경우에도 무한재귀로 죽지 않게 하는 이중 방어(현재 구조에선 발생 안 하지만 안전망).
+    if _seen is None:
+        _seen = set()
+    if alias in _seen:
+        print(prefix + "└── " + alias + "  (순환 참조 감지, 더 안 내려감)")
+        return
+    _seen = _seen | {alias}
+
+    visited.add(alias)
     connector = "└── " if is_last else "├── "
     label = alias
     if external_jump:
@@ -982,7 +1051,7 @@ def print_tree(alias, prefix="", is_last=True, external_jump=None):
     child_prefix = prefix + ("    " if is_last else "│   ")
     kids = sorted(children.get(alias, []))
     for i, kid in enumerate(kids):
-        print_tree(kid, child_prefix, i == len(kids) - 1)
+        print_tree(kid, child_prefix, i == len(kids) - 1, _seen=_seen)
 
 
 for g in group_order:
@@ -994,6 +1063,12 @@ for g in group_order:
         ext = next((j for a, j in roots if a == alias), None)
         print_tree(alias, "", i == len(group_roots) - 1, external_jump=ext)
     print()
+
+unreachable = sorted(set(hosts) - visited)
+if unreachable:
+    print("[순환 참조로 도달 불가 - ProxyJump 설정을 확인하세요]")
+    for alias in unreachable:
+        print(f"  {alias}  (-> ProxyJump {hosts[alias]['proxyjump']})")
 PYEOF
 }
 
