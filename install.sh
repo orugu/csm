@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.11 (2026-07-31)
+# version 1.12 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -21,7 +21,7 @@
 #   sm              전체 호스트 flat 목록에서 골라 접속
 #   csm             그룹 -> 호스트 순으로 골라 접속
 #   csm --mkdir     새 Host 항목을 대화형으로 추가 (그룹 지정/새 그룹 생성 가능)
-#   csm --add       ID@IP 한 줄로 바로 Host 추가 (-p로 포트 지정, 그룹없이/기타로 추가)
+#   csm --add       ID@IP 한 줄로 바로 Host 추가 (-p로 포트, -n으로 이름 지정, 그룹없이/기타로 추가)
 #   csm --move      기존 호스트를 다른 그룹으로 이동
 #   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
 #   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
@@ -75,7 +75,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm        : "# csm-group: 그룹이름" 주석 기준으로 그룹 -> 호스트 2단계 메뉴로 접속
 #              (csm-group 주석이 없거나 그룹이 1개뿐이면 sm과 동일하게 동작)
 # csm --mkdir: 새 Host 항목을 대화형으로 추가(그룹 선택/새 그룹 생성 가능)
-# csm --add  : ID@IP 한 줄로 바로 Host 추가(-p로 포트 지정, 그룹없이/기타로 추가)
+# csm --add  : ID@IP 한 줄로 바로 Host 추가(-p로 포트, -n으로 이름 지정, 그룹없이/기타로 추가)
 # csm --move : 기존 호스트를 다른 그룹으로 이동
 # csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
 # csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
@@ -98,7 +98,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # --mkdir/--move는 파일을 고치기 전에 항상 ~/.ssh/config.bak.<타임스탬프>로 백업을 남긴다.
 # 여러 별칭이 한 Host 줄에 같이 있는 경우(예: "Host a b c") --move는 그 줄 전체를 통째로 옮긴다.
 
-_CSM_VERSION="1.10"
+_CSM_VERSION="1.12"
 _CSM_REPO_SSH="git@github.com:orugu/csm.git"
 _CSM_UPDATE_CACHE="$HOME/.config/csm/update_cache"
 
@@ -261,7 +261,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
 사용법:
   csm              그룹 -> 호스트 순으로 골라서 접속
   csm --mkdir      새 Host 항목을 대화형으로 추가
-  csm --add        ID@IP 한 줄로 바로 Host 추가 (-p로 포트 지정)
+  csm --add        ID@IP 한 줄로 바로 Host 추가 (-p로 포트, -n으로 이름 지정)
   csm --move       기존 호스트를 다른 그룹으로 이동
   csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
   csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
@@ -632,27 +632,30 @@ _csm_add() {
   case "$1" in
     --help|-h|-\?)
       cat <<'EOF'
-사용법: csm --add <ID@IP> [-p <포트>]
+사용법: csm --add <ID@IP> [-p <포트>] [-n <이름>]
 
 한 줄로 바로 Host 항목을 추가한다(대화형 csm --mkdir의 빠른 버전).
-그룹 없이(기타로) 추가되고, 별칭은 IP를 그대로 쓴다.
+그룹 없이(기타로) 추가된다.
 
   <ID@IP>     User@HostName 형식. 예: root@192.168.0.10
   -p <포트>   접속 포트. 생략하면 SSH 기본값(22)을 그대로 쓴다
               (~/.ssh/config에 Port 줄 자체를 안 남김 - 이미 22가 기본이라 명시할 필요 없음)
+  -n <이름>   Host 별칭. 생략하면 IP를 그대로 별칭으로 쓴다
 
--p는 <ID@IP> 앞이든 뒤든 순서 상관없이 인식된다.
+-p/-n은 <ID@IP> 앞이든 뒤든 순서 상관없이 인식된다.
 
 예:
   csm --add root@192.168.0.10
   csm --add root@192.168.0.10 -p 2222
   csm --add -p 2222 root@192.168.0.10
+  csm --add root@192.168.0.10 -n myserver
+  csm --add -n myserver -p 2222 root@192.168.0.10
 EOF
       return
       ;;
   esac
 
-  local idip="" port=""
+  local idip="" port="" name=""
   while [ $# -gt 0 ]; do
     case "$1" in
       -p)
@@ -666,6 +669,15 @@ EOF
         shift
         port="$1"
         ;;
+      -n)
+        # -p와 동일한 이유로 방어: 값 없이 넘어가지 않는다.
+        if [ $# -lt 2 ]; then
+          echo "-n 뒤에 이름이 필요합니다. (csm --add --help 참고)"
+          return 1
+        fi
+        shift
+        name="$1"
+        ;;
       -*)
         echo "알 수 없는 옵션: $1 (csm --add --help 참고)"
         return 1
@@ -678,7 +690,7 @@ EOF
   done
 
   if [ -z "$idip" ]; then
-    echo "사용법: csm --add <ID@IP> [-p <포트>] (csm --add --help 참고)"
+    echo "사용법: csm --add <ID@IP> [-p <포트>] [-n <이름>] (csm --add --help 참고)"
     return 1
   fi
 
@@ -694,17 +706,20 @@ EOF
     return 1
   fi
 
+  # -n을 안 주면 지금까지처럼 IP를 별칭으로 쓴다(하위호환 유지).
+  local alias_val="${name:-$ip_val}"
+
   if [ ! -f ~/.ssh/config ]; then
     echo "~/.ssh/config 가 없습니다."
     return 1
   fi
 
-  if grep -E "^Host " ~/.ssh/config | awk '{for(i=2;i<=NF;i++) print $i}' | grep -qxF "$ip_val"; then
-    echo "이미 존재하는 별칭입니다: $ip_val (취소됨)"
+  if grep -E "^Host " ~/.ssh/config | awk '{for(i=2;i<=NF;i++) print $i}' | grep -qxF "$alias_val"; then
+    echo "이미 존재하는 별칭입니다: $alias_val (취소됨)"
     return 1
   fi
 
-  local block="Host ${ip_val}
+  local block="Host ${alias_val}
     HostName ${ip_val}
     User ${user_val}
 "
@@ -735,7 +750,7 @@ print("OK")
 PYEOF
 
   if [ $? -eq 0 ]; then
-    echo "추가 완료: ${user_val}@${ip_val}${port:+:$port}"
+    echo "추가 완료: ${alias_val} (${user_val}@${ip_val}${port:+:$port})"
   else
     echo "추가 실패 (백업은 남아있음: ~/.ssh/config.bak.*)"
   fi
