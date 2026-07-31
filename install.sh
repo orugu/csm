@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.5 (2026-07-30)
+# version 1.6 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -26,6 +26,7 @@
 #   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
 #   csm --logs      여러 호스트 로그를 동시에 tail(tmux 분할창/접두어 방식)
 #   csm --graph     ProxyJump 체인을 트리로 시각화
+#   csm --copy-id   호스트를 골라 ssh-copy-id로 공개키 등록
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -76,6 +77,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
 # csm --logs  : 여러 호스트를 멀티선택해서 로그를 동시에 tail(tmux 있으면 분할창, 없으면 접두어 방식)
 # csm --graph : Host의 ProxyJump 관계를 그룹별 트리로 시각화
+# csm --copy-id: 호스트를 골라 ssh-copy-id로 공개키 등록(--mkdir 직후에도 물어봄)
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -110,6 +112,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
   csm --logs       여러 호스트를 멀티선택해서 로그를 동시에 tail
   csm --graph      ProxyJump 체인을 그룹별 트리로 시각화
+  csm --copy-id    호스트를 골라 ssh-copy-id로 공개키 등록
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -137,6 +140,92 @@ _csm_list_groups() {
       if (!(g in seen)) { print g; seen[g] = 1 }
     }
   ' ~/.ssh/config
+}
+
+# 파일 내용이 실제로 유효한 SSH 공개키 한 줄 형식인지 검사(파일명이 .pub이어도
+# 내용이 진짜 공개키인지는 열어봐야 알 수 있어서, 확장자만 보고 판단하지 않는다).
+_csm_is_valid_pubkey() {
+  [ -f "$1" ] || return 1
+  head -c 40 "$1" 2>/dev/null | grep -qE \
+    '^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) '
+}
+
+# ~/.ssh 안의 *.pub 파일 중 실제로 유효한 것만 한 줄씩 출력
+_csm_find_pubkeys() {
+  local f
+  for f in ~/.ssh/*.pub(N); do
+    _csm_is_valid_pubkey "$f" && echo "$f"
+  done
+}
+
+# 호스트 하나를 받아서 적절한 공개키를 찾아 ssh-copy-id로 등록한다.
+# 우선순위: 그 호스트에 IdentityFile이 지정돼 있으면 그 키 -> 없거나 못 찾으면
+# ~/.ssh 안의 유효한 공개키 중에서 고르게 함(1개면 자동 선택, 여러 개면 fzf).
+_csm_copy_id_for_host() {
+  local host="$1"
+  if ! command -v ssh-copy-id >/dev/null 2>&1; then
+    echo "ssh-copy-id가 없습니다. (openssh 클라이언트 패키지 확인)"
+    return 1
+  fi
+
+  local identity pubkey=""
+  identity=$(ssh -G "$host" 2>/dev/null | awk '/^identityfile / {print $2; exit}')
+  if [ -n "$identity" ]; then
+    identity="${identity/#\~/$HOME}"
+    if _csm_is_valid_pubkey "${identity}.pub"; then
+      pubkey="${identity}.pub"
+    fi
+  fi
+
+  if [ -z "$pubkey" ]; then
+    local -a candidates
+    candidates=("${(@f)$(_csm_find_pubkeys)}")
+    if [ -z "${candidates[1]}" ]; then
+      echo "~/.ssh 안에 쓸 수 있는 공개키(.pub)가 없습니다. ssh-keygen으로 먼저 키를 만드세요."
+      return 1
+    elif [ ${#candidates[@]} -eq 1 ]; then
+      pubkey="${candidates[1]}"
+    else
+      pubkey=$(printf '%s\n' "${candidates[@]}" | fzf --height 40% --reverse --prompt="사용할 공개키 > ")
+      [ -z "$pubkey" ] && return 1
+    fi
+  fi
+
+  echo "등록할 키: $pubkey -> $host"
+  ssh-copy-id -i "$pubkey" "$host"
+}
+
+_csm_copy_id() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --copy-id
+
+호스트를 고른 뒤 ssh-copy-id로 공개키를 등록한다. 등록해두면 다음부터
+비밀번호 없이 키로 바로 접속된다.
+
+사용할 공개키는 이렇게 고른다:
+  1) 그 호스트에 IdentityFile이 지정돼 있으면 그 키의 .pub을 우선 사용
+  2) 아니면 ~/.ssh 안의 *.pub 파일 중 내용이 실제로 유효한 공개키 형식인 것만 후보로 삼음
+     (파일명만 .pub이고 내용이 이상한 파일은 후보에서 제외)
+  3) 후보가 1개면 자동 선택, 여러 개면 fzf로 고름
+EOF
+      return
+      ;;
+  esac
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  local host
+  host=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
+    fzf --height 40% --reverse --prompt="키 등록할 호스트 > " \
+        --preview 'ssh -G {} | grep -E "^(hostname|user|port|identityfile) " ')
+  [ -z "$host" ] && return
+
+  _csm_copy_id_for_host "$host"
 }
 
 _csm_mkdir() {
@@ -232,6 +321,12 @@ PYEOF
 
   if [ $? -eq 0 ]; then
     echo "추가 완료: [$group] $alias"
+    printf "지금 SSH 키를 등록할까요? (ssh-copy-id, 다음부터 비밀번호 없이 접속) [y/N]: "
+    local do_copy_id
+    read -r do_copy_id
+    case "$do_copy_id" in
+      y|Y|yes|YES) _csm_copy_id_for_host "$alias" ;;
+    esac
   else
     echo "추가 실패 (백업은 남아있음: ~/.ssh/config.bak.*)"
   fi
@@ -677,6 +772,11 @@ csm() {
     --graph)
       shift
       _csm_graph "$@"
+      return
+      ;;
+    --copy-id)
+      shift
+      _csm_copy_id "$@"
       return
       ;;
     -*)

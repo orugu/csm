@@ -59,6 +59,17 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
   하고 실제 tmux 환경에서 돌려보지는 않았다. tmux가 있는 환경에서 처음 쓸 때는 이 경로가
   기대대로 동작하는지 확인부터 할 것.
 
+- `csm --copy-id`(v1.6)의 IdentityFile 감지는 `ssh -G <host> | awk '/^identityfile /
+  {print $2; exit}'`로 첫 번째 줄만 쓴다. 호스트에 `IdentityFile`을 명시적으로 지정해두면
+  `ssh -G`가 그것만 보여줘서 정확히 잡히지만(실측 확인: hapcheon), 명시 안 해둔 호스트는
+  `ssh -G`가 OpenSSH 기본 후보 목록(id_rsa, id_ecdsa, id_ecdsa_sk, id_ed25519, ...)을
+  순서대로 다 보여주는데 그중 첫 번째(보통 id_rsa)만 본다 — id_rsa.pub이 없는 ed25519 전용
+  환경에서는 `_csm_is_valid_pubkey`가 파일 존재 자체를 확인하니 자연스럽게 실패해서
+  `_csm_find_pubkeys` 폴백으로 넘어가긴 하지만(실측 확인: Tasha-personal), 만약 id_rsa.pub과
+  id_ed25519.pub이 둘 다 있는 환경이면 사용자가 실제로 원하는 키가 아니라 그냥 첫 번째로
+  발견된 기본 키를 오판해서 쓸 수 있다 — 이 경우엔 `--copy-id` 실행 시 나오는 "등록할 키: ..."
+  줄을 보고 원치 않는 키면 Ctrl+C로 취소할 것.
+
 ## 알려진 제한 (일부러 안 고친 것, 버그 아님)
 
 - 한 `Host` 줄에 별칭이 여러 개(`Host a b c`)면 `csm --move`는 통째로 옮긴다.
