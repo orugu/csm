@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.10 (2026-07-31)
+# version 1.11 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -21,6 +21,7 @@
 #   sm              전체 호스트 flat 목록에서 골라 접속
 #   csm             그룹 -> 호스트 순으로 골라 접속
 #   csm --mkdir     새 Host 항목을 대화형으로 추가 (그룹 지정/새 그룹 생성 가능)
+#   csm --add       ID@IP 한 줄로 바로 Host 추가 (-p로 포트 지정, 그룹없이/기타로 추가)
 #   csm --move      기존 호스트를 다른 그룹으로 이동
 #   csm --tunnel    호스트를 골라 SSH 포트포워딩(-L/-D) 열기
 #   csm --status    등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
@@ -74,6 +75,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm        : "# csm-group: 그룹이름" 주석 기준으로 그룹 -> 호스트 2단계 메뉴로 접속
 #              (csm-group 주석이 없거나 그룹이 1개뿐이면 sm과 동일하게 동작)
 # csm --mkdir: 새 Host 항목을 대화형으로 추가(그룹 선택/새 그룹 생성 가능)
+# csm --add  : ID@IP 한 줄로 바로 Host 추가(-p로 포트 지정, 그룹없이/기타로 추가)
 # csm --move : 기존 호스트를 다른 그룹으로 이동
 # csm --tunnel: 호스트를 골라 SSH 포트포워딩(-L 로컬 포워딩 / -D SOCKS) 열기
 # csm --status: 등록된 모든 호스트에 병렬 SSH 접속해서 생존/응답시간/uptime/디스크 사용량 표로 확인
@@ -259,6 +261,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
 사용법:
   csm              그룹 -> 호스트 순으로 골라서 접속
   csm --mkdir      새 Host 항목을 대화형으로 추가
+  csm --add        ID@IP 한 줄로 바로 Host 추가 (-p로 포트 지정)
   csm --move       기존 호스트를 다른 그룹으로 이동
   csm --tunnel     호스트를 골라 SSH 포트포워딩(-L 로컬포워딩 / -D SOCKS) 열기
   csm --status     등록된 모든 호스트 생존/응답시간/uptime/디스크 사용량 확인
@@ -618,6 +621,121 @@ PYEOF
     case "$do_copy_id" in
       y|Y|yes|YES) _csm_copy_id_for_host "$alias" ;;
     esac
+  else
+    echo "추가 실패 (백업은 남아있음: ~/.ssh/config.bak.*)"
+  fi
+}
+
+# csm --mkdir의 빠른 버전 - 대화형 프롬프트 없이 한 줄로 바로 Host를 추가한다.
+# 그룹 없이(기타로) 추가되며, 별칭은 IP를 그대로 쓴다.
+_csm_add() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --add <ID@IP> [-p <포트>]
+
+한 줄로 바로 Host 항목을 추가한다(대화형 csm --mkdir의 빠른 버전).
+그룹 없이(기타로) 추가되고, 별칭은 IP를 그대로 쓴다.
+
+  <ID@IP>     User@HostName 형식. 예: root@192.168.0.10
+  -p <포트>   접속 포트. 생략하면 SSH 기본값(22)을 그대로 쓴다
+              (~/.ssh/config에 Port 줄 자체를 안 남김 - 이미 22가 기본이라 명시할 필요 없음)
+
+-p는 <ID@IP> 앞이든 뒤든 순서 상관없이 인식된다.
+
+예:
+  csm --add root@192.168.0.10
+  csm --add root@192.168.0.10 -p 2222
+  csm --add -p 2222 root@192.168.0.10
+EOF
+      return
+      ;;
+  esac
+
+  local idip="" port=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -p)
+        # 값 없이 -p만 달랑 오면(마지막 인자인 경우) 조용히 빈 값으로 넘어가지 않고
+        # 여기서 바로 에러내고 중단한다 - net-dashboard의 "-p 값 없으면 기존 인스턴스를
+        # 부수는" 실제 사고를 겪은 뒤로, 값이 필요한 옵션은 항상 이렇게 방어한다.
+        if [ $# -lt 2 ]; then
+          echo "-p 뒤에 포트 번호가 필요합니다. (csm --add --help 참고)"
+          return 1
+        fi
+        shift
+        port="$1"
+        ;;
+      -*)
+        echo "알 수 없는 옵션: $1 (csm --add --help 참고)"
+        return 1
+        ;;
+      *)
+        idip="$1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$idip" ]; then
+    echo "사용법: csm --add <ID@IP> [-p <포트>] (csm --add --help 참고)"
+    return 1
+  fi
+
+  local user_val="${idip%%@*}"
+  local ip_val="${idip#*@}"
+  if [ "$user_val" = "$idip" ] || [ -z "$user_val" ] || [ -z "$ip_val" ]; then
+    echo "형식이 잘못됐습니다: '$idip' (ID@IP 형식이어야 합니다, 예: root@192.168.0.10)"
+    return 1
+  fi
+
+  if [ -n "$port" ] && ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    echo "포트는 숫자여야 합니다: $port"
+    return 1
+  fi
+
+  if [ ! -f ~/.ssh/config ]; then
+    echo "~/.ssh/config 가 없습니다."
+    return 1
+  fi
+
+  if grep -E "^Host " ~/.ssh/config | awk '{for(i=2;i<=NF;i++) print $i}' | grep -qxF "$ip_val"; then
+    echo "이미 존재하는 별칭입니다: $ip_val (취소됨)"
+    return 1
+  fi
+
+  local block="Host ${ip_val}
+    HostName ${ip_val}
+    User ${user_val}
+"
+  if [ -n "$port" ]; then
+    block="${block}    Port ${port}
+"
+  fi
+  block="${block}
+"
+
+  _csm_backup_config
+
+  python3 - ~/.ssh/config "$block" <<'PYEOF'
+import sys
+path, block = sys.argv[1], sys.argv[2]
+
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+
+# 그룹 없이(기타로) 추가하려면 첫 "# csm-group:" 주석보다도 앞에 넣어야 한다 -
+# csm()/csm --graph의 그룹 파싱이 BEGIN{group="기타"}로 시작해서 첫 csm-group 주석을
+# 만나기 전까지는 전부 기타로 잡기 때문에, 파일 끝에 붙이면 마지막 그룹에 잘못 속한다.
+lines.insert(0, block)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(lines)
+print("OK")
+PYEOF
+
+  if [ $? -eq 0 ]; then
+    echo "추가 완료: ${user_val}@${ip_val}${port:+:$port}"
   else
     echo "추가 실패 (백업은 남아있음: ~/.ssh/config.bak.*)"
   fi
@@ -1115,6 +1233,11 @@ csm() {
       ;;
     --mkdir)
       _csm_mkdir
+      return
+      ;;
+    --add)
+      shift
+      _csm_add "$@"
       return
       ;;
     --move)
