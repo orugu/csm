@@ -35,7 +35,21 @@ sudo를 걸거나 하지 않음) 계속 진행한다.
 | `csm --logs` | 여러 호스트를 멀티선택해서 로그를 동시에 tail (tmux 분할창 또는 접두어 방식) |
 | `csm --graph` | ProxyJump 체인을 그룹별 트리로 시각화 |
 | `csm --copy-id` | 호스트를 골라 `ssh-copy-id`로 공개키 등록 (다음부터 비밀번호 없이 접속) |
+| `csm --setting` | fzf UI로 설정 값 변경 (`--reset`으로 초기화) |
 | `csm --help`, `-h` | 도움말 |
+
+### 설정 (`csm --setting`)
+
+`~/.config/csm/settings.conf`(KEY=VALUE)에 저장되고 저장 즉시(새 터미널 없이) 다음 실행부터 반영된다.
+
+| 키 | 기본값 | 설명 |
+|---|---|---|
+| `fzf_height` | 40 | 모든 fzf 메뉴의 높이(%) |
+| `status_timeout` | 5 | `csm --status`의 호스트별 SSH 접속 타임아웃(초) |
+| `status_workers` | 20 | `csm --status` 동시 접속 수 |
+| `mkdir_default_port` | (없음) | `csm --mkdir`에서 Port를 비워둘 때 자동으로 채울 값 |
+| `logs_mode` | auto | `csm --logs` 방식: `auto`(tmux 있으면 자동)/`tmux`/`prefix` |
+| `copy_id_key` | (자동판별) | `csm --copy-id`에서 항상 쓸 공개키 경로 강제 지정 |
 
 `csm --mkdir`로 새 호스트를 추가하면 바로 이어서 키를 등록할지 물어본다(같은 로직).
 사용할 공개키는 그 호스트에 `IdentityFile`이 지정돼 있으면 그 키를 우선 쓰고, 없으면

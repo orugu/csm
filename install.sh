@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.6 (2026-07-31)
+# version 1.7 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -27,6 +27,7 @@
 #   csm --logs      여러 호스트 로그를 동시에 tail(tmux 분할창/접두어 방식)
 #   csm --graph     ProxyJump 체인을 트리로 시각화
 #   csm --copy-id   호스트를 골라 ssh-copy-id로 공개키 등록
+#   csm --setting   fzf UI로 각종 설정 값 변경(메뉴 높이, --status 타임아웃 등)
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -78,6 +79,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --logs  : 여러 호스트를 멀티선택해서 로그를 동시에 tail(tmux 있으면 분할창, 없으면 접두어 방식)
 # csm --graph : Host의 ProxyJump 관계를 그룹별 트리로 시각화
 # csm --copy-id: 호스트를 골라 ssh-copy-id로 공개키 등록(--mkdir 직후에도 물어봄)
+# csm --setting: fzf UI로 각종 설정 값 변경
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -95,7 +97,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 sm() {
   local host
   host=$(grep -E "^Host " ~/.ssh/config 2>/dev/null | grep -v '\*' | awk '{print $2}' | \
-    fzf --height 40% --reverse --prompt="ssh > " \
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="ssh > " \
         --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
   [ -n "$host" ] && ssh "$host"
 }
@@ -113,6 +115,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --logs       여러 호스트를 멀티선택해서 로그를 동시에 tail
   csm --graph      ProxyJump 체인을 그룹별 트리로 시각화
   csm --copy-id    호스트를 골라 ssh-copy-id로 공개키 등록
+  csm --setting    fzf UI로 각종 설정 값 변경
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -128,6 +131,102 @@ EOF
 
 _csm_backup_config() {
   cp ~/.ssh/config ~/.ssh/config.bak."$(date +%Y%m%d%H%M%S)"
+}
+
+# --- 설정 (csm --setting) -----------------------------------------------
+# ~/.config/csm/settings.conf 에 KEY=VALUE 한 줄씩 저장. 파일이 없거나 키가
+# 없으면 매번 넘겨준 기본값을 쓴다 - 매 호출마다 새로 읽으므로 csm --setting으로
+# 바꾸면 같은 터미널에서 바로 다음 실행부터 반영된다(새 터미널/재로그인 불필요).
+_CSM_SETTINGS_FILE="$HOME/.config/csm/settings.conf"
+
+_csm_get_setting() {
+  local key="$1" default="$2"
+  if [ -f "$_CSM_SETTINGS_FILE" ]; then
+    local val
+    val=$(awk -F= -v k="$key" '$1==k{v=substr($0, index($0,"=")+1)} END{print v}' "$_CSM_SETTINGS_FILE")
+    if [ -n "$val" ]; then
+      echo "$val"
+      return
+    fi
+  fi
+  echo "$default"
+}
+
+_csm_set_setting() {
+  local key="$1" val="$2"
+  mkdir -p "$(dirname "$_CSM_SETTINGS_FILE")"
+  touch "$_CSM_SETTINGS_FILE"
+  local tmp
+  tmp=$(mktemp)
+  grep -v "^${key}=" "$_CSM_SETTINGS_FILE" > "$tmp" 2>/dev/null
+  echo "${key}=${val}" >> "$tmp"
+  mv "$tmp" "$_CSM_SETTINGS_FILE"
+}
+
+_csm_fzf_height() {
+  _csm_get_setting fzf_height 40
+}
+
+_csm_setting() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --setting [--reset]
+
+csm의 각종 동작을 fzf로 골라서 바꾼다. ~/.config/csm/settings.conf에 저장되고
+바로 다음 실행부터 적용된다(새 터미널 필요 없음).
+
+--reset  모든 설정을 지우고 기본값으로 되돌림
+
+설정 항목:
+  fzf_height          메뉴 높이(%). 기본 40
+  status_timeout      csm --status의 호스트별 SSH 접속 타임아웃(초). 기본 5
+  status_workers      csm --status 동시 접속 수. 기본 20
+  mkdir_default_port  csm --mkdir에서 Port를 비워둘 때 자동으로 채울 기본값(비우면 미설정)
+  logs_mode           csm --logs 방식: auto(tmux 있으면 자동 사용) / tmux / prefix. 기본 auto
+  copy_id_key         csm --copy-id에서 자동판별 대신 항상 쓸 공개키 경로(비우면 자동판별)
+EOF
+      return
+      ;;
+    --reset)
+      rm -f "$_CSM_SETTINGS_FILE"
+      echo "설정을 초기화했습니다(전부 기본값)."
+      return
+      ;;
+  esac
+
+  while true; do
+    local menu
+    menu=$(cat <<EOF
+fzf_height          (현재: $(_csm_get_setting fzf_height 40)%)
+status_timeout      (현재: $(_csm_get_setting status_timeout 5)초)
+status_workers      (현재: $(_csm_get_setting status_workers 20))
+mkdir_default_port  (현재: $(_csm_get_setting mkdir_default_port "(미설정)"))
+logs_mode           (현재: $(_csm_get_setting logs_mode auto))
+copy_id_key         (현재: $(_csm_get_setting copy_id_key "(자동판별)"))
+EOF
+)
+    local choice
+    choice=$(printf '%s\n' "$menu" | \
+      fzf --height "$(_csm_fzf_height)%" --reverse --prompt="설정 > " \
+          --header="값 바꿀 항목을 고르세요 (Esc로 종료)")
+    [ -z "$choice" ] && return
+
+    local key="${choice%% *}"
+
+    if [ "$key" = "logs_mode" ]; then
+      local val
+      val=$(printf 'auto\ntmux\nprefix\n' | \
+        fzf --height "$(_csm_fzf_height)%" --reverse --prompt="logs_mode > ")
+      [ -n "$val" ] && _csm_set_setting logs_mode "$val"
+      continue
+    fi
+
+    printf "%s 새 값 (엔터만 누르면 취소): " "$key"
+    local newval
+    read -r newval
+    [ -n "$newval" ] && _csm_set_setting "$key" "$newval"
+  done
 }
 
 # ~/.ssh/config에서 그룹 이름만 등장 순서대로(중복 제거) 뽑기
@@ -168,12 +267,25 @@ _csm_copy_id_for_host() {
     return 1
   fi
 
-  local identity pubkey=""
-  identity=$(ssh -G "$host" 2>/dev/null | awk '/^identityfile / {print $2; exit}')
-  if [ -n "$identity" ]; then
-    identity="${identity/#\~/$HOME}"
-    if _csm_is_valid_pubkey "${identity}.pub"; then
-      pubkey="${identity}.pub"
+  local pubkey=""
+  local forced_key
+  forced_key=$(_csm_get_setting copy_id_key "")
+  if [ -n "$forced_key" ]; then
+    if _csm_is_valid_pubkey "$forced_key"; then
+      pubkey="$forced_key"
+    else
+      echo "설정된 copy_id_key($forced_key)가 유효한 공개키가 아니라서 무시하고 자동판별합니다."
+    fi
+  fi
+
+  local identity
+  if [ -z "$pubkey" ]; then
+    identity=$(ssh -G "$host" 2>/dev/null | awk '/^identityfile / {print $2; exit}')
+    if [ -n "$identity" ]; then
+      identity="${identity/#\~/$HOME}"
+      if _csm_is_valid_pubkey "${identity}.pub"; then
+        pubkey="${identity}.pub"
+      fi
     fi
   fi
 
@@ -186,7 +298,7 @@ _csm_copy_id_for_host() {
     elif [ ${#candidates[@]} -eq 1 ]; then
       pubkey="${candidates[1]}"
     else
-      pubkey=$(printf '%s\n' "${candidates[@]}" | fzf --height 40% --reverse --prompt="사용할 공개키 > ")
+      pubkey=$(printf '%s\n' "${candidates[@]}" | fzf --height "$(_csm_fzf_height)%" --reverse --prompt="사용할 공개키 > ")
       [ -z "$pubkey" ] && return 1
     fi
   fi
@@ -221,7 +333,7 @@ EOF
 
   local host
   host=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
-    fzf --height 40% --reverse --prompt="키 등록할 호스트 > " \
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="키 등록할 호스트 > " \
         --preview 'ssh -G {} | grep -E "^(hostname|user|port|identityfile) " ')
   [ -z "$host" ] && return
 
@@ -237,7 +349,7 @@ _csm_mkdir() {
   local NEWGROUP_LABEL="[+ 새 그룹 만들기]"
   local group_choice
   group_choice=$( { _csm_list_groups; echo "$NEWGROUP_LABEL"; } | \
-    fzf --height 40% --reverse --prompt="group > ")
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="group > ")
   [ -z "$group_choice" ] && return
 
   local group is_new=0
@@ -270,8 +382,11 @@ _csm_mkdir() {
   read -r hostname_val
   printf "User (엔터로 생략): "
   read -r user_val
-  printf "Port (엔터로 생략, 기본 22): "
+  local default_port
+  default_port=$(_csm_get_setting mkdir_default_port "")
+  printf "Port (엔터=%s): " "${default_port:-생략}"
   read -r port_val
+  [ -z "$port_val" ] && port_val="$default_port"
   printf "IdentityFile 경로 (엔터로 생략): "
   read -r idfile_val
 
@@ -340,13 +455,13 @@ _csm_move() {
 
   local alias
   alias=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
-    fzf --height 40% --reverse --prompt="이동할 호스트 > ")
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="이동할 호스트 > ")
   [ -z "$alias" ] && return
 
   local NEWGROUP_LABEL="[+ 새 그룹 만들기]"
   local group_choice
   group_choice=$( { _csm_list_groups; echo "$NEWGROUP_LABEL"; } | \
-    fzf --height 40% --reverse --prompt="옮길 그룹 > ")
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="옮길 그룹 > ")
   [ -z "$group_choice" ] && return
 
   local group is_new=0
@@ -448,13 +563,13 @@ EOF
 
   local host
   host=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
-    fzf --height 40% --reverse --prompt="터널 열 호스트 > " \
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="터널 열 호스트 > " \
         --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
   [ -z "$host" ] && return
 
   local mode
   mode=$(printf '로컬 포워딩 (-L)\nSOCKS 동적 포워딩 (-D)\n' | \
-    fzf --height 40% --reverse --prompt="포워딩 종류 > ")
+    fzf --height "$(_csm_fzf_height)%" --reverse --prompt="포워딩 종류 > ")
   [ -z "$mode" ] && return
 
   if [[ "$mode" == SOCKS* ]]; then
@@ -517,22 +632,28 @@ EOF
     return 1
   fi
 
-  python3 - "$hosts" <<'PYEOF'
+  local timeout_setting workers_setting
+  timeout_setting=$(_csm_get_setting status_timeout 5)
+  workers_setting=$(_csm_get_setting status_workers 20)
+
+  python3 - "$hosts" "$timeout_setting" "$workers_setting" <<'PYEOF'
 import sys
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 hosts = [h.strip() for h in sys.argv[1].splitlines() if h.strip()]
+conn_timeout = int(sys.argv[2])
+workers = int(sys.argv[3])
 
 
 def check(host):
     start = time.time()
     try:
         proc = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host,
+            ["ssh", "-o", f"ConnectTimeout={conn_timeout}", "-o", "BatchMode=yes", host,
              "uptime; df -h / 2>/dev/null | tail -1"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=conn_timeout + 5,
         )
         elapsed = time.time() - start
         if proc.returncode != 0:
@@ -549,7 +670,7 @@ def check(host):
 
 
 results = []
-with ThreadPoolExecutor(max_workers=20) as ex:
+with ThreadPoolExecutor(max_workers=workers) as ex:
     for r in ex.map(check, hosts):
         results.append(r)
 
@@ -592,7 +713,7 @@ EOF
 
   local hosts_selected
   hosts_selected=$(grep -E "^Host " ~/.ssh/config | grep -v '\*' | awk '{print $2}' | \
-    fzf --multi --height 60% --reverse --prompt="로그 볼 호스트(Tab으로 여러개, Enter로 확정) > " \
+    fzf --multi --height "$(_csm_fzf_height)%" --reverse --prompt="로그 볼 호스트(Tab으로 여러개, Enter로 확정) > " \
         --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
   if [ -z "$hosts_selected" ]; then
     echo "선택 안 함"
@@ -610,7 +731,20 @@ EOF
   local -a hosts_arr
   hosts_arr=("${(@f)hosts_selected}")
 
-  if command -v tmux >/dev/null 2>&1; then
+  local logs_mode
+  logs_mode=$(_csm_get_setting logs_mode auto)
+  local use_tmux=0
+  if [ "$logs_mode" = "tmux" ]; then
+    if command -v tmux >/dev/null 2>&1; then
+      use_tmux=1
+    else
+      echo "설정(logs_mode=tmux)이 tmux를 쓰라고 돼있는데 tmux가 안 보입니다. 접두어 방식으로 대체합니다."
+    fi
+  elif [ "$logs_mode" != "prefix" ] && command -v tmux >/dev/null 2>&1; then
+    use_tmux=1
+  fi
+
+  if [ "$use_tmux" -eq 1 ]; then
     local session="csm-logs-$$"
     tmux new-session -d -s "$session" -n logs "ssh ${hosts_arr[1]} '$cmd'; echo; echo '[$hosts_arr[1] 종료됨, 아무 키나 누르면 창 닫힘]'; read -k1"
     local i
@@ -779,6 +913,11 @@ csm() {
       _csm_copy_id "$@"
       return
       ;;
+    --setting)
+      shift
+      _csm_setting "$@"
+      return
+      ;;
     -*)
       echo "알 수 없는 옵션: $1 (csm --help 참고)"
       return 1
@@ -832,11 +971,11 @@ csm() {
   local group host
   while true; do
     group=$(printf '%s\n' "${group_order[@]}" | \
-      fzf --height 40% --reverse --prompt="category > ")
+      fzf --height "$(_csm_fzf_height)%" --reverse --prompt="category > ")
     [ -z "$group" ] && return
 
     host=$(printf '%s\n' ${=groups[$group]} | \
-      fzf --height 40% --reverse --prompt="$group > " \
+      fzf --height "$(_csm_fzf_height)%" --reverse --prompt="$group > " \
           --bind 'backward-eof:abort' \
           --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
 

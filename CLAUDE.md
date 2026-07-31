@@ -69,6 +69,15 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
   id_ed25519.pub이 둘 다 있는 환경이면 사용자가 실제로 원하는 키가 아니라 그냥 첫 번째로
   발견된 기본 키를 오판해서 쓸 수 있다 — 이 경우엔 `--copy-id` 실행 시 나오는 "등록할 키: ..."
   줄을 보고 원치 않는 키면 Ctrl+C로 취소할 것.
+- `csm --setting`(v1.7)은 `~/.config/csm/settings.conf`(KEY=VALUE)를 매 함수 호출마다
+  새로 읽는다(캐싱 안 함) — 그래서 설정 바꾸면 같은 터미널에서 바로 다음 실행부터
+  반영된다. `_csm_get_setting`/`_csm_set_setting` 실측 검증(2026-07-31): 저장/조회/덮어쓰기
+  (중복 라인 안 생김) 확인, `copy_id_key`에 무효한 값을 넣었을 때 경고 후 자동판별로
+  폴백하는 것과 유효한 값을 넣었을 때 그걸 바로 쓰는 것 둘 다 실제 호스트로 확인,
+  `logs_mode=tmux`인데 tmux가 실제로 없는 환경에서 경고 후 prefix로 폴백하는 것도 확인.
+  `status_timeout`/`status_workers`는 파이프가 아니라 `python3 - <데이터> <timeout> <workers>
+  <<'PYEOF'` 식으로 전부 argv로 넘긴다 — 위에 적어둔 stdin 충돌 함정을 이 함수를 만들 때도
+  똑같이 피해야 했음.
 
 ## 알려진 제한 (일부러 안 고친 것, 버그 아님)
 
