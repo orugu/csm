@@ -36,7 +36,16 @@ sudo를 걸거나 하지 않음) 계속 진행한다.
 | `csm --graph` | ProxyJump 체인을 그룹별 트리로 시각화 |
 | `csm --copy-id` | 호스트를 골라 `ssh-copy-id`로 공개키 등록 (다음부터 비밀번호 없이 접속) |
 | `csm --setting` | fzf UI로 설정 값 변경 (`--reset`으로 초기화) |
+| `csm --update` | GitHub에서 최신 버전으로 재설치 |
 | `csm --help`, `-h` | 도움말 |
+
+### 업데이트 알림
+
+`sm`/`csm` 메인 화면은 GitHub(`orugu/csm`)의 최신 태그를 확인해서(기본 6시간마다 캐시,
+`update_check_interval_hours` 설정으로 조절) 새 버전이 있으면 화면 우측 상단에
+"업데이트 있음 (vX.Y) - U: 지금 업데이트"를 띄운다. 그 자리에서 **U 키**를 누르면 바로
+업데이트되고, `csm --update`로 수동 실행도 가능하다. 둘 다 재설치 후엔 새 터미널을
+열거나 `source ~/.zshrc` 해야 적용된다(지금 켜져 있는 셸은 옛날 함수를 계속 씀).
 
 ### 설정 (`csm --setting`)
 

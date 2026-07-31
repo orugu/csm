@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.7 (2026-07-31)
+# version 1.8 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -28,6 +28,7 @@
 #   csm --graph     ProxyJump 체인을 트리로 시각화
 #   csm --copy-id   호스트를 골라 ssh-copy-id로 공개키 등록
 #   csm --setting   fzf UI로 각종 설정 값 변경(메뉴 높이, --status 타임아웃 등)
+#   csm --update    GitHub에서 최신 버전으로 재설치 (새 버전 있으면 sm/csm 화면에서 U키로도 가능)
 #   csm --help, -h  도움말
 #
 # csm --mkdir/--move는 ~/.ssh/config를 고치기 전 항상 ~/.ssh/config.bak.<타임스탬프>로 백업한다.
@@ -80,6 +81,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # csm --graph : Host의 ProxyJump 관계를 그룹별 트리로 시각화
 # csm --copy-id: 호스트를 골라 ssh-copy-id로 공개키 등록(--mkdir 직후에도 물어봄)
 # csm --setting: fzf UI로 각종 설정 값 변경
+# csm --update : GitHub에서 최신 버전으로 재설치(새 버전 있으면 메인 화면에 U키 알림)
 # csm --help : 도움말
 #
 # 예시 ~/.ssh/config:
@@ -94,10 +96,130 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # --mkdir/--move는 파일을 고치기 전에 항상 ~/.ssh/config.bak.<타임스탬프>로 백업을 남긴다.
 # 여러 별칭이 한 Host 줄에 같이 있는 경우(예: "Host a b c") --move는 그 줄 전체를 통째로 옮긴다.
 
+_CSM_VERSION="1.8"
+_CSM_REPO_SSH="git@github.com:orugu/csm.git"
+_CSM_UPDATE_CACHE="$HOME/.config/csm/update_cache"
+
+# --- 업데이트 확인/알림/실행 ------------------------------------------------
+# GitHub 태그(vX.Y 형식)를 확인해서 현재 버전보다 높은 게 있으면 sm/csm 메인 화면에
+# 알림을 띄우고, U 키(또는 csm --update)로 바로 재설치할 수 있게 한다.
+# 매번 원격을 확인하면 fzf 뜨는 속도가 느려지니, 캐시 파일(update_cache)에
+# "checked_at=<epoch>\nlatest=<vX.Y>"로 저장해두고 update_check_interval_hours(기본 6)
+# 시간이 지났을 때만 다시 확인한다.
+
+_csm_remote_version() {
+  GIT_SSH_COMMAND="ssh -o ConnectTimeout=3 -o BatchMode=yes" \
+    git ls-remote --tags "$_CSM_REPO_SSH" 2>/dev/null \
+    | awk -F'refs/tags/' '{print $2}' \
+    | grep -E '^v[0-9]+\.[0-9]+$' \
+    | sort -V | tail -1
+}
+
+_csm_cached_latest() {
+  [ -f "$_CSM_UPDATE_CACHE" ] || return
+  awk -F= '$1=="latest"{print $2}' "$_CSM_UPDATE_CACHE"
+}
+
+_csm_cache_checked_at() {
+  if [ -f "$_CSM_UPDATE_CACHE" ]; then
+    awk -F= '$1=="checked_at"{print $2}' "$_CSM_UPDATE_CACHE"
+  else
+    echo 0
+  fi
+}
+
+_csm_write_update_cache() {
+  mkdir -p "$(dirname "$_CSM_UPDATE_CACHE")"
+  { echo "checked_at=$(date +%s)"; echo "latest=$1"; } > "$_CSM_UPDATE_CACHE"
+}
+
+_csm_refresh_update_cache_if_stale() {
+  local now checked_at interval_hours interval
+  now=$(date +%s)
+  checked_at=$(_csm_cache_checked_at)
+  interval_hours=$(_csm_get_setting update_check_interval_hours 6)
+  interval=$(( interval_hours * 3600 ))
+  if (( now - checked_at >= interval )); then
+    local remote
+    remote=$(_csm_remote_version)
+    [ -n "$remote" ] && _csm_write_update_cache "$remote"
+  fi
+}
+
+# 새 버전이 있으면 성공(0), 없으면 실패(1) - 캐시가 오래됐으면 이 안에서 새로 확인한다.
+_csm_update_available() {
+  _csm_refresh_update_cache_if_stale
+  local latest latest_num
+  latest=$(_csm_cached_latest)
+  [ -z "$latest" ] && return 1
+  latest_num="${latest#v}"
+  [ "$latest_num" = "$_CSM_VERSION" ] && return 1
+  [ "$(printf '%s\n%s\n' "$_CSM_VERSION" "$latest_num" | sort -V | tail -1)" = "$latest_num" ]
+}
+
+# sm/csm 메인 화면 fzf에 넘길 --header/--bind 인자를 전역 배열 _CSM_UPD_ARGS에 채운다
+# (업데이트 없으면 빈 배열). eval 없이 그냥 전역 배열 하나 쓰는 게 훨씬 덜 위험해서
+# 이렇게 함 - 호출부에서는 `_csm_update_fzf_args; ... "${_CSM_UPD_ARGS[@]}" ...` 식으로 쓴다.
+typeset -ga _CSM_UPD_ARGS
+_csm_update_fzf_args() {
+  _CSM_UPD_ARGS=()
+  _csm_update_available || return
+  local latest msg cols pad header
+  latest=$(_csm_cached_latest)
+  msg="업데이트 있음 ($latest) - U: 지금 업데이트"
+  cols=${COLUMNS:-80}
+  # zsh는 비-tty 환경에서 COLUMNS를 "0"으로 설정해두기도 해서(unset이 아님) ${:-} 폴백이
+  # 안 먹는다 - 그 경우 우측정렬 대신 그냥 왼쪽 정렬로 조용히 성능 저하되는 걸 방지.
+  [ "$cols" -le 0 ] 2>/dev/null && cols=80
+  pad=$(( cols - ${#msg} ))
+  (( pad < 0 )) && pad=0
+  header=$(printf '%*s%s' "$pad" "" "$msg")
+  _CSM_UPD_ARGS=(--header "$header" --bind "U:execute(zsh -ic 'csm --update')")
+}
+
+_csm_update() {
+  case "$1" in
+    --help|-h|-\?)
+      cat <<'EOF'
+사용법: csm --update
+
+GitHub(orugu/csm)에서 최신 버전을 clone해서 install.sh를 다시 돌린다(재설치).
+설치 후에는 새 터미널을 열거나 'source ~/.zshrc' 해야 새 버전 함수가 적용된다
+(현재 실행 중인 셸은 계속 옛날 버전의 함수를 갖고 있음 - 다른 CLI 업데이트와 동일).
+EOF
+      return
+      ;;
+  esac
+
+  echo "최신 버전 확인 중..."
+  local remote
+  remote=$(_csm_remote_version)
+  if [ -z "$remote" ]; then
+    echo "GitHub에서 버전 정보를 가져오지 못했습니다(네트워크 또는 저장소 접근 권한 확인)."
+    return 1
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  echo "clone 중: $_CSM_REPO_SSH"
+  if ! git clone --quiet --depth 1 "$_CSM_REPO_SSH" "$tmpdir" 2>/dev/null; then
+    echo "저장소를 clone하지 못했습니다."
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  bash "$tmpdir/install.sh"
+  rm -rf "$tmpdir"
+  _csm_write_update_cache "$remote"
+  echo "업데이트 완료 ($remote). 새 터미널을 열거나 'source ~/.zshrc' 하세요."
+}
+
 sm() {
+  _csm_update_fzf_args
   local host
   host=$(grep -E "^Host " ~/.ssh/config 2>/dev/null | grep -v '\*' | awk '{print $2}' | \
     fzf --height "$(_csm_fzf_height)%" --reverse --prompt="ssh > " \
+        "${_CSM_UPD_ARGS[@]}" \
         --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
   [ -n "$host" ] && ssh "$host"
 }
@@ -116,6 +238,7 @@ csm (Custom SSH Management) — fzf 기반 SSH 접속정보 관리/접속 도구
   csm --graph      ProxyJump 체인을 그룹별 트리로 시각화
   csm --copy-id    호스트를 골라 ssh-copy-id로 공개키 등록
   csm --setting    fzf UI로 각종 설정 값 변경
+  csm --update     GitHub에서 최신 버전으로 재설치
   csm --help, -h   이 도움말
   sm               그룹 없이 전체 호스트를 flat하게 골라서 접속
 
@@ -918,6 +1041,11 @@ csm() {
       _csm_setting "$@"
       return
       ;;
+    --update)
+      shift
+      _csm_update "$@"
+      return
+      ;;
     -*)
       echo "알 수 없는 옵션: $1 (csm --help 참고)"
       return 1
@@ -968,15 +1096,18 @@ csm() {
     return
   fi
 
+  _csm_update_fzf_args
   local group host
   while true; do
     group=$(printf '%s\n' "${group_order[@]}" | \
-      fzf --height "$(_csm_fzf_height)%" --reverse --prompt="category > ")
+      fzf --height "$(_csm_fzf_height)%" --reverse --prompt="category > " \
+          "${_CSM_UPD_ARGS[@]}")
     [ -z "$group" ] && return
 
     host=$(printf '%s\n' ${=groups[$group]} | \
       fzf --height "$(_csm_fzf_height)%" --reverse --prompt="$group > " \
           --bind 'backward-eof:abort' \
+          "${_CSM_UPD_ARGS[@]}" \
           --preview 'ssh -G {} | grep -E "^(hostname|user|port) " ')
 
     if [ -n "$host" ]; then

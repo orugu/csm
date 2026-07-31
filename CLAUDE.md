@@ -78,6 +78,21 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
   `status_timeout`/`status_workers`는 파이프가 아니라 `python3 - <데이터> <timeout> <workers>
   <<'PYEOF'` 식으로 전부 argv로 넘긴다 — 위에 적어둔 stdin 충돌 함정을 이 함수를 만들 때도
   똑같이 피해야 했음.
+- **`csm --update`/버전 알림(v1.8)**: `_CSM_VERSION`(sourced 파일 안의 변수)과 GitHub 태그
+  (`git ls-remote --tags`로 확인, vX.Y 형식만 인식)를 비교한다. 캐시(`~/.config/csm/update_cache`)를
+  둬서 매번 원격을 안 때리고 `update_check_interval_hours`(기본 6시간)마다만 재확인한다.
+  fzf의 `U` 키 바인딩(`--bind "U:execute(zsh -ic 'csm --update')"`)은 **반드시 `zsh -ic`로
+  새 인터랙티브 셸을 띄워서 실행해야 한다** — fzf의 execute()는 새 프로세스라서 zsh 함수
+  정의(csm 등)를 상속 못 하는데, `-i`로 띄우면 `~/.zshrc`를 다시 읽어서 `csm`이 정의된다.
+  이 파일을 고칠 때 이 부분을 `execute(csm --update)`처럼 단순화하면 "command not found: csm"
+  으로 깨진다 — 잊지 말 것.
+  실측 검증(2026-07-31): 로컬 버전(1.8, 아직 태그 안 붙인 개발 중 버전)이 원격 최신 태그(v1.7)보다
+  높을 때 `_csm_update_available`이 정확히 "업데이트 없음"(exit 1)을 반환하는 것, 캐시를 조작해서
+  원격이 더 높은 상황을 흉내냈을 때 "업데이트 있음"(exit 0) + 헤더 문자열이 정확히 만들어지는 것,
+  실제로 `git clone` + `install.sh` 재실행까지 전체 파이프라인이 동작하는 것(v1.7로 실제 재설치됐다가
+  로컬 v1.8로 재설치해서 원복)까지 확인함. 우측 정렬용 `$COLUMNS`가 비-tty 환경에서 "0"으로
+  설정돼있어(unset이 아니라서 `${COLUMNS:-80}` 폴백이 안 먹음) 정렬이 깨지는 것도 실측으로
+  발견해서 `[ "$cols" -le 0 ] && cols=80`로 방어함.
 
 ## 알려진 제한 (일부러 안 고친 것, 버그 아님)
 
@@ -85,3 +100,6 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
 - `csm-group:` 주석이 없거나 그룹이 1개뿐이면 `csm`은 `sm`(flat 목록)과 동일하게 동작한다.
   이건 정상 동작이지 에러가 아니다.
 - zsh 전용. bash에서의 동작은 보장 안 함.
+- 업데이트 알림의 `U` 키 바인딩은 fzf의 검색어 입력과 같은 키 입력창을 공유한다 —
+  호스트/그룹 이름에 대문자 `U`가 들어가는 걸 타이핑하려고 하면 그 U가 검색어로 안 가고
+  업데이트 실행으로 가로채질 수 있다. 사용자가 명시적으로 요청한 키 배정이라 그대로 뒀다.
