@@ -120,6 +120,29 @@ zsh -ic 'source ~/.zshrc; type sm; type csm; csm --help'
      체크해서 걸러내도록 수정(실측: `abc`, `-5`, `fzf_height=150/0` 다 거부되고 유효값만
      저장되는 것 확인).
 
+- **v1.10 버그 수정 5건** (전체 재점검으로 발견, 전부 실측 재현 후 수정):
+  1. **v1.9에서 고친 숫자 설정값 크래시가 "UI에서만" 막혀있었다** — `csm --setting`을
+     거치면 검증되지만, `~/.config/csm/settings.conf`를 텍스트 에디터로 직접 편집해서
+     `status_timeout=abc` 같은 값을 넣으면 여전히 `csm --status`가 `int()`에서 터졌다
+     (실측 재현). 근본 수정: `csm --status`의 python heredoc 안에서 `int()` 변환을
+     `_safe_int()`(try/except, 실패하면 기본값+stderr 경고)로 감싸고, `_csm_refresh_update_cache_if_stale`의
+     `update_check_interval_hours`와 `_csm_mkdir`의 `mkdir_default_port`도 값을
+     **실제로 쓰는 지점**에서 정규식 검증하도록 방어를 추가했다. **교훈: 입력 검증은
+     UI 진입점이 아니라 값을 실제로 소비하는 지점에 둬야 한다** — 설정 파일은 UI를
+     거치지 않고도 언제든 직접 고쳐질 수 있다.
+  2. `_csm_tunnel`에서 `$host`를 `printf`의 포맷 문자열 자리에 직접 넣어서, 호스트
+     별칭에 `%`가 있으면 깨지던 것 — `printf "%s" "$host"`로 인자 분리.
+  3. `_csm_tunnel`의 `-L` 로컬 포워딩에서 원격 호스트로 IPv6 리터럴(`::1`, `fe80::1`)을
+     주면 `local:remote:port` 콜론 파싱이 깨지던 것 — 콜론이 있으면 `[::1]`처럼
+     대괄호로 감싸도록 수정(이미 대괄호가 있으면 중복으로 안 감쌈).
+  4. `_csm_logs`의 prefix(tmux 없음) 모드에서 `sed "s/^/[$h] /"`가 호스트 별칭에
+     `&`가 있으면 그 `&`가 sed의 "매치된 전체" 특수문자로 해석돼서 조용히 사라지던 것
+     (실측: `host&name` -> `hostname`으로 잘림) — `$h`를 sed 치환문자열에 넣기 전에
+     `&` -> `\&`로 이스케이프.
+  5. `csm <대시로 안 시작하는 인자>`(예: `csm status`처럼 `--`를 빼먹은 오타)를 아무
+     경고 없이 무시하고 기본 메뉴로 들어가던 것 — `case`문에 `""`(인자 없음, 정상)와
+     `*`(그 외 전부, 에러)를 명시적으로 나눠서 오타를 안내하도록 수정.
+
 ## 알려진 제한 (일부러 안 고친 것, 버그 아님)
 
 - 한 `Host` 줄에 별칭이 여러 개(`Host a b c`)면 `csm --move`는 통째로 옮긴다.

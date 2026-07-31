@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sm / csm (Custom SSH Management, fzf 기반 SSH 접속정보 관리/접속 도구) 설치 스크립트.
-# version 1.9 (2026-07-31)
+# version 1.10 (2026-07-31)
 #
 # 사용법:
 #   git clone https://github.com/orugu/csm.git && bash csm/install.sh
@@ -96,7 +96,7 @@ cat > "$TARGET_FILE" <<'ZSHEOF'
 # --mkdir/--move는 파일을 고치기 전에 항상 ~/.ssh/config.bak.<타임스탬프>로 백업을 남긴다.
 # 여러 별칭이 한 Host 줄에 같이 있는 경우(예: "Host a b c") --move는 그 줄 전체를 통째로 옮긴다.
 
-_CSM_VERSION="1.9"
+_CSM_VERSION="1.10"
 _CSM_REPO_SSH="git@github.com:orugu/csm.git"
 _CSM_UPDATE_CACHE="$HOME/.config/csm/update_cache"
 
@@ -138,6 +138,9 @@ _csm_refresh_update_cache_if_stale() {
   now=$(date +%s)
   checked_at=$(_csm_cache_checked_at)
   interval_hours=$(_csm_get_setting update_check_interval_hours 6)
+  # settings.conf를 직접 편집해서 숫자가 아닌 값을 넣었을 때의 방어(csm --setting UI를
+  # 거치면 이미 막히지만, 파일을 텍스트 에디터로 직접 고치면 그 검증을 우회할 수 있다).
+  [[ "$interval_hours" =~ ^[0-9]+$ ]] && [ "$interval_hours" -gt 0 ] || interval_hours=6
   interval=$(( interval_hours * 3600 ))
   if (( now - checked_at >= interval )); then
     local remote
@@ -552,6 +555,11 @@ _csm_mkdir() {
   read -r user_val
   local default_port
   default_port=$(_csm_get_setting mkdir_default_port "")
+  # settings.conf 직접 편집으로 숫자가 아닌 값이 들어와 있으면 무시(빈 값 취급) -
+  # 그대로 쓰면 ~/.ssh/config에 잘못된 Port 줄이 그대로 박혀버린다.
+  if [ -n "$default_port" ] && ! [[ "$default_port" =~ ^[0-9]+$ ]]; then
+    default_port=""
+  fi
   printf "Port (엔터=%s): " "${default_port:-생략}"
   read -r port_val
   [ -z "$port_val" ] && port_val="$default_port"
@@ -754,7 +762,9 @@ EOF
     printf "로컬 포트: "
     local local_port
     read -r local_port
-    printf "원격 호스트 (엔터=localhost, $host 기준 상대적): "
+    # $host를 printf 포맷 문자열에 직접 넣으면 호스트 별칭에 %가 있을 때 깨진다 -
+    # %s로 인자를 분리해서 안전하게 넣는다.
+    printf "원격 호스트 (엔터=localhost, %s 기준 상대적): " "$host"
     local remote_host
     read -r remote_host
     remote_host="${remote_host:-localhost}"
@@ -765,8 +775,14 @@ EOF
       echo "로컬/원격 포트는 필수입니다. 취소됨"
       return 1
     fi
+    # remote_host가 IPv6 리터럴(예: ::1, fe80::1)이면 콜론이 여러 개라
+    # local:remote:port 구분자와 충돌한다 - ssh -L 문법대로 대괄호로 감싸야 한다.
+    local remote_host_for_L="$remote_host"
+    case "$remote_host" in
+      *:*) [[ "$remote_host" == \[*\] ]] || remote_host_for_L="[${remote_host}]" ;;
+    esac
     echo "터널 여는 중: localhost:$local_port -> ($host 경유) -> $remote_host:$remote_port (Ctrl+C로 종료)"
-    ssh -N -L "${local_port}:${remote_host}:${remote_port}" "$host"
+    ssh -N -L "${local_port}:${remote_host_for_L}:${remote_port}" "$host"
   fi
 }
 
@@ -811,8 +827,24 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 hosts = [h.strip() for h in sys.argv[1].splitlines() if h.strip()]
-conn_timeout = int(sys.argv[2])
-workers = int(sys.argv[3])
+
+
+def _safe_int(raw, default, name):
+    # settings.conf를 UI(csm --setting) 말고 텍스트 에디터로 직접 편집해서 숫자가
+    # 아닌 값을 넣으면 예전엔 여기서 바로 크래시났다(실측 확인: status_timeout=abc).
+    # UI 쪽 검증은 우회 가능하니 실제로 값을 쓰는 이 지점에서 방어한다.
+    try:
+        v = int(raw)
+        if v <= 0:
+            raise ValueError
+        return v
+    except (TypeError, ValueError):
+        print(f"경고: {name} 설정값 {raw!r}이 올바르지 않아 기본값 {default}을 씁니다.", file=sys.stderr)
+        return default
+
+
+conn_timeout = _safe_int(sys.argv[2], 5, "status_timeout")
+workers = _safe_int(sys.argv[3], 20, "status_workers")
 
 
 def check(host):
@@ -933,9 +965,12 @@ EOF
   else
     echo "tmux가 없어서 [호스트명] 접두어로 합쳐서 보여줍니다 (Ctrl+C로 전체 종료)."
     local -a pids
-    local h
+    local h h_esc
     for h in "${hosts_arr[@]}"; do
-      ssh "$h" "$cmd" 2>&1 | sed "s/^/[$h] /" &
+      # sed 치환 문자열에서 &는 "매치된 전체"를 뜻하는 특수문자라, 호스트 별칭에
+      # &가 있으면 그 &만 조용히 사라져버린다(실측 확인) - 미리 \&로 이스케이프.
+      h_esc="${h//&/\\&}"
+      ssh "$h" "$cmd" 2>&1 | sed "s/^/[$h_esc] /" &
       pids+=($!)
     done
     trap "kill ${pids[@]} 2>/dev/null" INT
@@ -1123,6 +1158,13 @@ csm() {
       ;;
     -*)
       echo "알 수 없는 옵션: $1 (csm --help 참고)"
+      return 1
+      ;;
+    "") ;;  # 인자 없음 - 정상, 아래 메뉴로 진행
+    *)
+      # 대시로 안 시작하는 인자를 조용히 무시하고 메뉴로 들어가던 버그(예: 오타로
+      # `csm status`처럼 --를 빼먹으면 아무 말 없이 그냥 기본 메뉴가 뜸) - 안내하고 종료.
+      echo "알 수 없는 인자: $1 (csm --help 참고)"
       return 1
       ;;
   esac
